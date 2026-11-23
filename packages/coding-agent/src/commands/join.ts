@@ -32,7 +32,10 @@ export default class Join extends Command {
 		value: Flags.string({ description: "--once: answer value (a select option label, or editor text)" }),
 		prompt: Flags.string({ description: "--once: send a prompt (steers when the host is streaming)" }),
 		abort: Flags.boolean({ description: "--once: interrupt the host's current turn", default: false }),
-		"wait-idle": Flags.integer({ description: "--once: after --prompt/--abort, wait up to N s for idle (hint)" }),
+		"wait-idle": Flags.integer({
+			description:
+				"--once: after --prompt/--abort, wait up to N s for the host to read idle (best-effort hint, not authoritative)",
+		}),
 		"connect-timeout": Flags.integer({ description: "--once: relay connect timeout in seconds (default 15)" }),
 		timeout: Flags.integer({ description: "--once: overall deadline in seconds (default 120)" }),
 		name: Flags.string({ description: "--once: display name shown to the host (default omp-once)" }),

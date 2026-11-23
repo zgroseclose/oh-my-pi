@@ -14,7 +14,10 @@
  *   FIFO behind it.
  * - **Barrier.** A `ui-response` for a reqId the host never issued is answered
  *   with a targeted `ui-request-end` for that reqId and has no other effect.
- *   Host reqIds start at 1, so {@link BARRIER_REQ_ID} (0) is never a real ask.
+ *   Host reqIds count up from 1 (`++uiReqSeq`), so the negative
+ *   {@link BARRIER_REQ_ID} can never name a real ask, whatever the allocator's
+ *   starting point; a host that ever validated reqIds would refuse it with an
+ *   `error` (a loud `host-error` here), never settle an ask with it.
  *   Sent right after `hello`, its reply marks the end of the replayed asks;
  *   sent right after a `prompt` or `abort`, its reply means the host has run
  *   that frame's synchronous handling (refusals included).
@@ -35,8 +38,8 @@ export const HEADLESS_GUEST_PROTO = 3;
 /** Version of the JSON objects `omp join --once` prints. Bump on any breaking change. */
 export const HEADLESS_OUTPUT_VERSION = 1;
 
-/** reqId of the barrier probe; see the module comment. */
-export const BARRIER_REQ_ID = 0;
+/** reqId of the barrier probe; negative so it can never collide with a host-issued id. See the module comment. */
+export const BARRIER_REQ_ID = -1;
 
 /** Display name the host shows for this guest unless overridden. */
 export const DEFAULT_HEADLESS_GUEST_NAME = "omp-once";

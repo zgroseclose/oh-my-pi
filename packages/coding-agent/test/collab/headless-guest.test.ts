@@ -90,6 +90,21 @@ it("exits on the answered ask's ui-request-end, and reports a settled reqId as a
 	expect(again.json).toMatchObject({ action: "answer", status: "already-settled" });
 }, 30_000);
 
+it("never settles a live ask with its barrier probes, even when the guest holds the ask", async () => {
+	const { host, prompts, linkFile } = await startHost({ streaming: true });
+	const asked = host.requestGuestUi(APPROVAL, undefined, { retainOnReconnect: true });
+	if (!asked) throw new Error("host refused the ask");
+
+	// A prompt run sends two barriers: one after hello (as a recipient of the
+	// replayed ask) and one after the prompt.
+	const run = await runOnce({ linkFile, prompt: "keep going" });
+	expect(run.exitCode).toBe(0);
+	expect(prompts).toHaveLength(1);
+	// A barrier that named the ask would answer it with no value: a denial.
+	expect(await Promise.race([asked, Bun.sleep(100).then(() => "pending" as const)])).toBe("pending");
+	expect(host.inputRequired).toBe(true);
+}, 30_000);
+
 it("lands a prompt sent while the host streams as a steer attributed to the guest", async () => {
 	const { prompts, linkFile } = await startHost({ streaming: true });
 	const run = await runOnce({ linkFile, prompt: "stop and run the tests", name: "dammy" });

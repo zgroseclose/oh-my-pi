@@ -6,12 +6,18 @@ Working notes for the `omp join --once` branch (`feat/headless-collab-guest`, ba
 
 ```
 git clone git@github.com:zgroseclose/oh-my-pi.git && cd oh-my-pi
-git checkout feat/headless-collab-guest
-bun install                       # bun >= 1.4.4
+git checkout feat/headless-collab-guest   # pinned to v19.0.0: packages are 19.0.0
+bun install                               # verified with bun 1.4.5 (package.json needs >= 1.4.4)
+cp <stock 19.0.0 addon> packages/natives/native/   # see below; required
 bun packages/coding-agent/src/cli.ts join --once --link-file ~/.omp-link --print-requests
 ```
 
 The installed `omp` stays stock and keeps hosting the TUI.
+
+**Constraint:** the checkout's package version, the addon's version, and the stock omp version must all be the same release. This branch is pinned to `v19.0.0` because that is what the VM runs. A checkout of `main` will not load a 19.0.0 addon. The loader already says so explicitly rather than with a bare dlopen stack:
+
+- addon missing: `Failed to load pi_natives native addon for linux-x64.`, followed by every path it tried and the build hint
+- addon from another release: `Loaded <path> but it reports @oh-my-pi/pi-natives@<A>, not the @<B> this loader expects. The .node file on disk is from a different release than this loader`
 
 ### Native addon check (result: the addon is required, a Rust build is not)
 
@@ -34,12 +40,13 @@ Measured on macOS arm64 (Bun 1.4.5, addon from `@oh-my-pi/pi-natives-darwin-arm6
 
 The host sends `welcome`, then every `snapshot-chunk`, then the replayed asks, as one ordered batch. A lightweight guest cannot see an ask before the whole snapshot has crossed the relay.
 
-| Where | Relay | Snapshot | `requestsMs` | Wall (incl. CLI startup) |
-| --- | --- | --- | --- | --- |
-| macOS laptop | `local-relay.ts` on localhost | 9.7 MB, 2,304 entries | 37 ms | 456 ms |
-| Work VM | public relay | ~9 MB real session | **TODO: measure** | |
+| Where | Relay | Snapshot | `requestsMs` | Wall (incl. CLI startup) | Status |
+| --- | --- | --- | --- | --- | --- |
+| macOS laptop | loopback (`local-relay.ts`, `ws://localhost:7466`) | 9.7 MB synthetic, 2,304 entries | 37 ms | 456 ms | measured |
+| Work VM | loopback (`local-relay.ts` on 127.0.0.1) | ~9 MB real session | **TODO** | **TODO** | to measure: the configuration Dammy will run |
+| Work VM | public relay (`my.omp.sh`) | ~9 MB real session | ~26 s | | estimate only (9 MB ÷ ~350 KB/s from code comments) |
 
-The localhost number shows the guest's own cost is negligible (decrypt + parse + discard). On the public relay the transfer dominates. At the ~350 KB/s the code comments cite for `my.omp.sh`, 9 MB is about 26 s. Run the VM checklist below and put the measured `timings.requestsMs` / `timings.snapshotBytes` here and in the PR.
+On loopback, the guest's own cost is negligible (decrypt, parse, discard), and the snapshot-then-asks ordering costs milliseconds. The ordering is a real transfer cost **only off-host**, through a remote relay. That is the honest bound, and it is the argument for `hello { snapshot: false }`: it matters to remote guests, not to a loopback driver. A real session also costs the host time to serialize its snapshot, which the synthetic run under-represents. Record the VM loopback `timings` before quoting a number for real sessions.
 
 ## Manual checklist on the VM
 
@@ -58,7 +65,7 @@ The localhost number shows the guest's own cost is negligible (decrypt + parse +
 >
 > Follow-up to discussion #6460 ("Step 0": collab outside the TUI) and #9643 (RpcClient extension UI).
 >
-> I built a headless one-shot guest, `omp join --once`, that lets an automated client see and answer what a live TUI session is waiting on: list pending asks, answer one, prompt (steer), or abort. It is printed as one JSON object and needs no host changes. It works against a stock host by speaking the existing frames: it discards `snapshot-chunk` bodies instead of building a replica, and it uses a `ui-response` for the never-issued reqId 0 as a barrier, since the host acknowledges it with a targeted `ui-request-end` queued behind the welcome batch.
+> I built a headless one-shot guest, `omp join --once`, that lets an automated client see and answer what a live TUI session is waiting on: list pending asks, answer one, prompt (steer), or abort. It is printed as one JSON object and needs no host changes. It works against a stock host by speaking the existing frames: it discards `snapshot-chunk` bodies instead of building a replica, and it uses a `ui-response` for the never-issued reqId -1 as a barrier, since the host acknowledges it with a targeted `ui-request-end` queued behind the welcome batch.
 >
 > Two things in the current protocol limit it:
 >
