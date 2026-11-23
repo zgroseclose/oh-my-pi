@@ -55,8 +55,8 @@ On loopback, the guest's own cost is negligible (decrypt, parse, discard), and t
 3. `umask 077; omp collab link <pid> --json > ~/.omp-link`
 4. Trigger a bash approval in A. `omp collab list --json` shows `"inputRequired": true`.
 5. `bun …/cli.ts join --once --link-file ~/.omp-link --print-requests`: the approval is listed. Run it again: still listed.
-6. `bun …/cli.ts join --once --link-file ~/.omp-link --answer <reqId> --value Approve`: A proceeds, and the guest prints `status: "answered"`.
-7. `bun …/cli.ts join --once --link-file ~/.omp-link --prompt "…"` mid-turn: it shows in A as a steer with the `omp-once` badge.
+6. `bun …/cli.ts join --once --link-file ~/.omp-link --answer <reqId> --value-file ~/.omp-reply` (the file holds `Approve`, mode 0600): A proceeds, and the guest prints `status: "settled"`, `confirmed: false`.
+7. `bun …/cli.ts join --once --link-file ~/.omp-link --prompt-file ~/.omp-prompt` mid-turn: it shows in A as a steer with the `omp-once` badge.
 8. Repeat step 5 against the real ~9 MB session through the public relay and record `timings`.
 
 ## Draft upstream issue
@@ -83,6 +83,8 @@ The plan was to shim `InteractiveModeContext`, reuse `CollabGuestLink` for the r
 1. **`guest.ts` takes the whole `InteractiveModeContext`, not `Pick`ed slices.** It touches about 25 members: `handleResumeSession` (the interactive mode's session-switch path, which builds the replica `AgentSession`), `eventController`, `renderInitialMessages`, `streamingComponent`, `pendingTools`, `loadingAnimation`, `statusLine`, `ui`, `showHookSelector`/`showHookEditor`, `setCollabGuest`, `reloadTodos`, `syncRunningSubagentBadge`, and others. A shim has to re-implement session creation (`handleResumeSession`) and stub the render surface.
 2. **Host events never reach the replica session's subscribers.** The guest feeds mirrored events to `ctx.eventController.dispatchSessionEvent` (`guest.ts:797`), and only lifecycle events go to the extension runner. `runRpcMode` subscribes with `session.subscribe` (`rpc-mode.ts:1806`), so it would print no host events. `session_settled` would never fire either.
 3. **`runRpcMode`'s commands drive the local session.** `prompt`/`steer`/`follow_up`/`abort` call the replica's own `AgentSession`, which would start a *local* LLM turn on the replica instead of sending a frame. Every command would need intercepting before `runRpcMode` sees it, at which point little of `runRpcMode` is reused.
+
+**Constraint for any persistent guest:** keep writer guests short-lived. Every connected writer counts in the host's settle rules: `requestGuestUi`'s `hadWritable` and `#dropAskRecipient`'s `writersRemain`. The host's own TUI dialog does not count. An always-on writer changes when pending asks settle as unavailable. `--mode rpc` should therefore default to a view-only (non-writer) connection, with writer access an explicit opt-in. Note that a view-only peer gets no ask replay, so an RPC caller that answers asks needs that opt-in.
 
 Options:
 

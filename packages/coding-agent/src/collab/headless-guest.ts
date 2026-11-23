@@ -59,6 +59,7 @@ export const HeadlessExitCode = {
 	protocol: 7,
 	"host-error": 8,
 	"invalid-value": 9,
+	"input-file": 10,
 } as const;
 
 export type HeadlessErrorCode = Exclude<keyof typeof HeadlessExitCode, "ok">;
@@ -158,12 +159,18 @@ export type HeadlessResult =
 			action: "answer";
 			reqId: number;
 			/**
-			 * `answered`: the answer was sent and the host then ended the ask (a concurrent
-			 * answer from another writer that won the race reads the same).
+			 * `settled`: the answer was sent and the host then ended the ask. The host ends
+			 * an ask the same way however it settles, so this does NOT confirm the answer
+			 * was applied: another writer's answer may have won the race, or the ask may
+			 * have been withdrawn (Esc at the host, the tool call aborted, a stop) as it
+			 * arrived. Report it as "answer sent, ask closed", not as "approved".
 			 * `already-settled`: the ask was not pending for this guest when it joined
-			 * (answered elsewhere, aborted, or never offered to writers).
+			 * (answered elsewhere, aborted, or never offered to writers); nothing was sent.
 			 */
-			status: "answered" | "already-settled";
+			status: "settled" | "already-settled";
+			/** Always false: no host frame says whose answer settled the ask. */
+			confirmed: false;
+			/** The value sent; absent for `already-settled`. */
 			value?: string;
 	  })
 	| (HeadlessResultBase & {
@@ -527,7 +534,7 @@ class HeadlessRun {
 	#answer(reqId: number, raw: string): void {
 		const request = this.#pending.get(reqId);
 		if (!request) {
-			this.#succeed(this.#result({ action: "answer", reqId, status: "already-settled" }));
+			this.#succeed(this.#result({ action: "answer", reqId, status: "already-settled", confirmed: false }));
 			return;
 		}
 		let value: string;
@@ -539,11 +546,11 @@ class HeadlessRun {
 			return;
 		}
 		this.#answerSent = reqId;
-		// The host ends the ask on every holder once it settles, and acknowledges an
-		// answer to an ask that already settled the same way. Either way it is no
-		// longer waiting; a concurrent answer from another writer cannot be told apart.
+		// The host ends the ask on every holder once it settles, whether by this
+		// answer, another writer's, or a withdrawal, and acknowledges an answer to an
+		// ask that already settled the same way. Only "no longer waiting" is known.
 		this.#onAnswerEnd = () => {
-			this.#succeed(this.#result({ action: "answer", reqId, status: "answered", value }));
+			this.#succeed(this.#result({ action: "answer", reqId, status: "settled", confirmed: false, value }));
 		};
 		this.#wrote = true;
 		this.#socket.send({ t: "ui-response", reqId, value });

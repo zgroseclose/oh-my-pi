@@ -95,8 +95,8 @@ A missing registry directory means no active hosts. An unreadable or symlinked r
 
 ```
 omp join --once --link-file <path> --print-requests
-omp join --once --link-file <path> --answer <reqId> --value <label|text>
-omp join --once --link-file <path> --prompt <text> [--wait-idle <sec>]
+omp join --once --link-file <path> --answer <reqId> (--value <label|text> | --value-file <path>)
+omp join --once --link-file <path> (--prompt <text> | --prompt-file <path>) [--wait-idle <sec>]
 omp join --once --link-file <path> --abort [--wait-idle <sec>]
 ```
 
@@ -114,16 +114,22 @@ umask 077; omp collab link <instanceId|pid> --json > ~/.omp-link
 
 The link is never printed. Error messages name the file, never its content.
 
+Prompt text and answer values are exposed in argv the same way, and prompts often carry the actual work. `--prompt-file` and `--value-file` read them from files under the same rule (regular file, owned by you, `0600` or stricter; exit 10 otherwise). The content is used verbatim except for one trailing newline. Automated callers should use the file forms. `--prompt` and `--value` are for humans at a shell.
+
 Use a **control** link. A host replays pending requests only to writers, and refuses writes from view-only peers, so a view-only link (`--view`) is refused up front for every action with exit code 4. The same exit code is returned when the host demotes a full-looking link because its write token is no longer current.
 
 ### Actions
 
 - `--print-requests` lists the asks the host is waiting on (approvals, `ask` selects, editor prompts) and exits 0 without writing anything.
-- `--answer <reqId> --value <v>` answers one ask and exits on the host's `ui-request-end` for that reqId. For a select, the value must be one of its option labels; an exact match wins, otherwise a unique case-insensitive match is normalized to the label. Any other value is refused locally (exit 9) and not sent, because a host reads an unknown approval label as a denial. For an editor, any text is sent. A JSON string literal (`--value '" padded "'`) passes leading or trailing whitespace through. An ask that is no longer pending (answered elsewhere, aborted, timed out) returns `status: "already-settled"` with exit 0. That is a success, not an error: first answer wins, and the usual cause is someone answering at the host's terminal first. Do not treat it as a failure to retry. An answer to an already-settled reqId is acknowledged and ignored by the host, so it cannot refuse a later ask, but there is nothing left to do.
+- `--answer <reqId> --value <v>` answers one ask and exits on the host's `ui-request-end` for that reqId. For a select, the value must be one of its option labels; an exact match wins, otherwise a unique case-insensitive match is normalized to the label. Any other value is refused locally (exit 9) and not sent, because a host reads an unknown approval label as a denial. For an editor, any text is sent. A JSON string literal (`--value '" padded "'`) passes leading or trailing whitespace through. The answer exits with `status: "settled"`, which means the answer was sent and the host then closed the ask. It does **not** confirm the answer was applied. The host sends the same `ui-request-end` however an ask settles: by this answer, by another writer's answer that won the race, or by a withdrawal (Esc at the host, the tool call aborted, a stop) as the answer arrived. The JSON carries `confirmed: false` to say so. Report it as "answer sent, ask closed", not as "approved". An ask that is no longer pending when the guest joins (answered elsewhere, aborted, timed out) returns `status: "already-settled"` with exit 0, and nothing is sent. That is a success, not an error: first answer wins, and the usual cause is someone answering at the host's terminal first. Do not treat it as a failure to retry. An answer to an already-settled reqId is acknowledged and ignored by the host, so it cannot refuse a later ask, but there is nothing left to do.
 - `--prompt <text>` sends a prompt. While the host is streaming, it lands as a **steer**: it is delivered at the next turn boundary, not queued as a follow-up. Collab has no follow-up frame. A steer that arrives while an approval is pending denies that tool call and is delivered first.
 - `--abort` interrupts the host's current turn.
 
 `--prompt` and `--abort` exit once the host has handled the frame, including any immediate refusal (for example, startup not finished). A prompt also waits 750 ms for the host's asynchronous refusal. `--wait-idle <sec>` is **best-effort, for humans**: it waits until a `state` frame reads idle (not streaming, nothing queued, not aborting). That frame is the host's debounced footer snapshot and reads idle during scheduling pauses (queued follow-ups, async-job waits, compaction), so the result is labeled `authoritative: false`. An automated driver should not end a job on it: an early idle reading is a lost turn. Watch for the next ask with `--print-requests`, or read the host transcript, instead.
+
+### Keep the guest short-lived
+
+A guest that has joined with a control link counts as a writer for as long as it stays connected, and writers change when the host settles asks. The host's own TUI dialog is not a writer. A new ask posted while writers are connected settles as unavailable if none of them could take it. An ask whose last holder leaves settles as unavailable if other writers remain. A permanently connected writer guest would therefore change when pending approvals give up. `--once` connects only for the length of one action for this reason. Any persistent guest (a future `--mode rpc`) should default to view-only, or make writer access an explicit opt-in.
 
 ### Leaving without answering is safe
 
@@ -155,13 +161,13 @@ On success, one JSON object on stdout:
 | `action`         | Extra fields                                                                                           |
 | ---------------- | ------------------------------------------------------------------------------------------------------ |
 | `print-requests` | `status: "ok"`, `requests[]`: `reqId`, `kind` (`select`/`editor`), `title`, `approval`, `options[]` (`label`, `description?`), `helpText?`, `prefill?` |
-| `answer`         | `reqId`, `status`: `answered` or `already-settled`, `value` (as sent)                                   |
+| `answer`         | `reqId`, `status`: `settled` or `already-settled`, `confirmed: false`, `value` (as sent; absent for `already-settled`) |
 | `prompt`         | `status: "submitted"`, `steer` (host was streaming when sent; non-authoritative), `idle?`               |
 | `abort`          | `status: "submitted"`, `idle?`                                                                          |
 
 `idle` (with `--wait-idle`) is `{ "authoritative": false, "idle": true|false, "waitedMs": n }`. `host` is the host's state as last seen. `timings` are milliseconds since the guest started connecting: `requestsMs` is time to the complete request list, which comes after the whole snapshot (see below).
 
-`answered` means the answer was sent and the host then ended the ask. A different writer's answer that wins the race reads the same way.
+`settled` means the answer was sent and the host then closed the ask; see `--answer` above for why that is not a confirmation.
 
 On failure, nothing goes to stdout. One JSON object goes to stderr, `{"version":1,"error":{"code","exitCode","message"}}`, with a matching exit code:
 
@@ -177,6 +183,7 @@ On failure, nothing goes to stdout. One JSON object goes to stderr, `{"version":
 | 7    | `protocol`      | Collab protocol version mismatch with the host                                                |
 | 8    | `host-error`    | The host refused the join or the action (an `error` frame)                                     |
 | 9    | `invalid-value` | `--value` is not one of the select's options                                                  |
+| 10   | `input-file`    | `--prompt-file` or `--value-file` missing, unreadable, too permissive, or not owned by you     |
 
 A connection that drops after a write was sent fails with `host-gone`, and the message says the outcome is unknown. The guest never rejoins mid-run, so a prompt is never sent twice.
 
@@ -193,7 +200,7 @@ Nothing in omp polls for you. A caller that only runs one-shot commands (no stdi
 1. Poll `omp collab list --json` every ~15 s. When a host's `inputRequired` turns `true`, exit the polling job so the caller wakes up.
 2. Mint a link into a `0600` file: `omp collab link <instanceId> --json`. The link is bound to the host's room generation, so re-mint after `stale_generation` or exit code 5.
 3. Run `omp join --once --link-file <f> --print-requests` and relay the requests (title, options) to a human.
-4. Run `omp join --once --link-file <f> --answer <reqId> --value "<label>"` with the reply. `already-settled` means someone answered at the terminal first.
+4. Write the reply to a `0600` file and run `omp join --once --link-file <f> --answer <reqId> --value-file <reply>`. `already-settled` means someone answered at the terminal first.
 
 ## Link format
 

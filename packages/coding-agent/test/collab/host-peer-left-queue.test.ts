@@ -321,7 +321,7 @@ it("keeps an approval pending when a --once guest lists it and leaves, so a late
 	expect((relisted.json.requests as { reqId: number }[]).map(request => request.reqId)).toEqual([requests[0]!.reqId]);
 
 	const answered = await runOnce({ linkFile: linkFile.path, answer: requests[0]!.reqId, value: "Approve" });
-	expect(answered.json).toMatchObject({ action: "answer", status: "answered", value: "Approve" });
+	expect(answered.json).toMatchObject({ action: "answer", status: "settled", value: "Approve" });
 	expect(await outcomeNow(asked)).toEqual({ kind: "answered", value: "Approve" });
 	expect(host.inputRequired).toBe(false);
 }, 30_000);

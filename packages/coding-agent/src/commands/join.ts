@@ -30,7 +30,11 @@ export default class Join extends Command {
 		"print-requests": Flags.boolean({ description: "--once: list the host's pending asks", default: false }),
 		answer: Flags.integer({ description: "--once: answer the pending ask with this reqId (needs --value)" }),
 		value: Flags.string({ description: "--once: answer value (a select option label, or editor text)" }),
+		"value-file": Flags.string({ description: "--once: read the answer value from a private file (mode 0600)" }),
 		prompt: Flags.string({ description: "--once: send a prompt (steers when the host is streaming)" }),
+		"prompt-file": Flags.string({
+			description: "--once: read the prompt from a private file (mode 0600), keeping it out of argv",
+		}),
 		abort: Flags.boolean({ description: "--once: interrupt the host's current turn", default: false }),
 		"wait-idle": Flags.integer({
 			description:
@@ -62,7 +66,9 @@ export default class Join extends Command {
 				printRequests: flags["print-requests"],
 				answer: flags.answer,
 				value: flags.value,
+				valueFile: flags["value-file"],
 				prompt: flags.prompt,
+				promptFile: flags["prompt-file"],
 				abort: flags.abort,
 				waitIdle: flags["wait-idle"],
 				connectTimeout: flags["connect-timeout"],

@@ -9,6 +9,7 @@
 import { afterEach, expect, it } from "bun:test";
 import type { CollabUiRequestDraft } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as path from "node:path";
+import type { HeadlessRequest } from "@oh-my-pi/pi-coding-agent/collab/headless-guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { formatCollabLink, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -82,7 +83,13 @@ it("exits on the answered ask's ui-request-end, and reports a settled reqId as a
 
 	const answered = await runOnce({ linkFile, answer: request!.reqId, value: "deny" });
 	expect(answered.exitCode).toBe(0);
-	expect(answered.json).toMatchObject({ action: "answer", reqId: request!.reqId, status: "answered", value: "Deny" });
+	expect(answered.json).toMatchObject({
+		action: "answer",
+		reqId: request!.reqId,
+		status: "settled",
+		confirmed: false,
+		value: "Deny",
+	});
 	expect(await asked).toEqual({ kind: "answered", value: "Deny" });
 
 	const again = await runOnce({ linkFile, answer: request!.reqId, value: "Approve" });
@@ -113,6 +120,35 @@ it("lands a prompt sent while the host streams as a steer attributed to the gues
 	expect(prompts).toEqual([
 		{ details: { from: "dammy" }, options: { streamingBehavior: "steer", queueChipText: "stop and run the tests" } },
 	]);
+}, 30_000);
+
+it("reads the prompt and the answer value from private files, refusing loose ones", async () => {
+	const { host, prompts, linkFile } = await startHost({ streaming: true });
+	const asked = host.requestGuestUi(APPROVAL, undefined, { retainOnReconnect: true });
+	if (!asked) throw new Error("host refused the ask");
+	const secret = "rewrite src/billing.ts using the ticket below";
+
+	const loose = await writeLinkFile(`${secret}\n`, 0o644);
+	cleanups.push(loose.cleanup);
+	const refused = await runOnce({ linkFile, promptFile: loose.path });
+	expect(refused.exitCode).toBe(10);
+	expect(refused.stderr).not.toContain(secret);
+	expect(prompts).toEqual([]);
+
+	// One trailing newline (as `echo` writes) is dropped; the rest is verbatim.
+	const promptFile = await writeLinkFile(`${secret}\n`);
+	cleanups.push(promptFile.cleanup);
+	const prompted = await runOnce({ linkFile, promptFile: promptFile.path });
+	expect(prompted.exitCode).toBe(0);
+	expect(prompted.stdout).not.toContain(secret);
+	expect(prompts.map(prompt => (prompt.options as { queueChipText: string }).queueChipText)).toEqual([secret]);
+
+	const [request] = (await runOnce({ linkFile, printRequests: true })).json.requests as HeadlessRequest[];
+	const valueFile = await writeLinkFile("Approve\n");
+	cleanups.push(valueFile.cleanup);
+	const answered = await runOnce({ linkFile, answer: request!.reqId, valueFile: valueFile.path });
+	expect(answered.json).toMatchObject({ status: "settled", value: "Approve" });
+	expect(await asked).toEqual({ kind: "answered", value: "Approve" });
 }, 30_000);
 
 it("forwards --abort to the host session", async () => {

@@ -174,7 +174,7 @@
 - Fixed plan review measuring "Approve and keep context" against the pre-plan model instead of the tier chosen in the "continue with" slider, so switching to a larger-context tier now enables it ([#19660](https://github.com/can1357/oh-my-pi/issues/19660))
 ### Added
 
-- Added `omp join --once` to read, answer, prompt, or abort a live collab session from scripts: it reads the link from a 0600 `--link-file`, prints one JSON object, and exits with distinct codes, without building a replica session.
+- Added `omp join --once` to read, answer, prompt, or abort a live collab session from scripts: it reads the link (and, with `--prompt-file`/`--value-file`, prompts and answers) from 0600 files, prints one JSON object, and exits with distinct codes, without building a replica session.
 
 ## [19.0.0] - 2026-11-18
 
