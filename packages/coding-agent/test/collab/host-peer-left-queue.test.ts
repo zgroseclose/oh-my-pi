@@ -13,8 +13,15 @@
 import { afterEach, expect, it, spyOn } from "bun:test";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import type { HeadlessRequest } from "@oh-my-pi/pi-coding-agent/collab/headless-guest";
+import {
+	COLLAB_PROTO,
+	type CollabFrame,
+	type CollabUiRequestDraft,
+	parseCollabLink,
+} from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { runOnce, writeLinkFile } from "./helpers/headless";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import {
 	HIGH_WATER_MARK,
@@ -264,3 +271,95 @@ it("ignores a hello that finishes decrypting after its sender's peer-left", asyn
 	expect(Math.max(...seen.participantCounts)).toBe(1);
 	expect(probe.targets.filter(peer => peer !== 0)).toEqual([]);
 }, 15_000);
+
+const APPROVAL: CollabUiRequestDraft = {
+	kind: "select",
+	title: "Allow bash: rm -rf build?",
+	options: ["Approve", "Deny"],
+	approval: true,
+};
+
+/** Resolves to the ask's outcome, or "pending" if it has not settled within a short window. */
+function outcomeNow<T>(asked: Promise<T>): Promise<T | "pending"> {
+	return Promise.race([asked, Bun.sleep(100).then(() => "pending" as const)]);
+}
+
+it("keeps an approval pending when a --once guest lists it and leaves, so a later --once guest can answer it", async () => {
+	installInMemoryRelay();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => host.stop("test done"));
+	await host.start("ws://localhost:8788");
+	const linkFile = await writeLinkFile(host.link);
+	cleanups.push(linkFile.cleanup);
+
+	// Raised while no writer is connected, as an approval in an unattended TUI is.
+	const asked = host.requestGuestUi(APPROVAL, undefined, { retainOnReconnect: true });
+	if (!asked) throw new Error("host refused to retain the ask for guests");
+
+	const listed = await runOnce({ linkFile: linkFile.path, printRequests: true });
+	expect(listed.exitCode).toBe(0);
+	const requests = listed.json.requests as HeadlessRequest[];
+	expect(requests).toEqual([
+		{
+			reqId: expect.any(Number),
+			kind: "select",
+			title: "Allow bash: rm -rf build?",
+			approval: true,
+			options: [{ label: "Approve" }, { label: "Deny" }],
+		},
+	]);
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("left the collab session")),
+		"host never observed the --once guest leaving",
+	);
+
+	// Leaving without answering is not a refusal: the ask waits for the next writer.
+	expect(await outcomeNow(asked)).toBe("pending");
+	expect(host.inputRequired).toBe(true);
+	const relisted = await runOnce({ linkFile: linkFile.path, printRequests: true });
+	expect((relisted.json.requests as { reqId: number }[]).map(request => request.reqId)).toEqual([requests[0]!.reqId]);
+
+	const answered = await runOnce({ linkFile: linkFile.path, answer: requests[0]!.reqId, value: "Approve" });
+	expect(answered.json).toMatchObject({ action: "answer", status: "answered", value: "Approve" });
+	expect(await outcomeNow(asked)).toEqual({ kind: "answered", value: "Approve" });
+	expect(host.inputRequired).toBe(false);
+}, 30_000);
+
+it("keeps an ask pending for the writer still holding it when a --once guest leaves", async () => {
+	installInMemoryRelay();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => host.stop("test done"));
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const linkFile = await writeLinkFile(host.link);
+	cleanups.push(linkFile.cleanup);
+
+	const writer = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: await importRoomKey(parsed.key) });
+	cleanups.push(() => writer.close());
+	const writerAsks: number[] = [];
+	writer.onFrame = frame => {
+		if (frame.t === "ui-request") writerAsks.push(frame.request.reqId);
+	};
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	writer.onOpen = () => writer.send({ t: "hello", proto: COLLAB_PROTO, name: "writer", writeToken });
+	writer.connect();
+	await waitFor(() => seen.notices.some(notice => notice.includes("writer joined")), "writer never joined");
+
+	const asked = host.requestGuestUi(APPROVAL, undefined, { retainOnReconnect: true });
+	if (!asked) throw new Error("host refused to post the ask");
+	await waitFor(() => writerAsks.length === 1, "writer never received the ask");
+
+	const listed = await runOnce({ linkFile: linkFile.path, printRequests: true });
+	expect((listed.json.requests as { reqId: number }[]).map(request => request.reqId)).toEqual(writerAsks);
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("omp-once left the collab session")),
+		"host never observed the --once guest leaving",
+	);
+
+	expect(await outcomeNow(asked)).toBe("pending");
+	writer.send({ t: "ui-response", reqId: writerAsks[0]!, value: "Deny" });
+	expect(await asked).toEqual({ kind: "answered", value: "Deny" });
+}, 30_000);

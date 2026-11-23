@@ -89,6 +89,112 @@ How it works: each room publishes its own private IPC endpoint (a Unix domain so
 
 A missing registry directory means no active hosts. An unreadable or symlinked registry directory is a listing error, not a successful empty result; POSIX also rejects foreign-owned directories. Individual unreachable or malformed host entries are still omitted independently. The CLI exits nonzero for a directory error; `/collab list` displays a sanitized, bounded error and leaves the TUI usable.
 
+## Headless one-shot guest (`omp join --once`)
+
+`omp join --once` is a guest for scripts and agents: it joins a live room, does one thing, prints one JSON object, and leaves. It builds no replica session (no session file, no `AgentSession`, no TUI): the transcript snapshot the host sends every joiner is received and discarded. It works against any host that speaks collab protocol v3, with no host-side setting.
+
+```
+omp join --once --link-file <path> --print-requests
+omp join --once --link-file <path> --answer <reqId> --value <label|text>
+omp join --once --link-file <path> --prompt <text> [--wait-idle <sec>]
+omp join --once --link-file <path> --abort [--wait-idle <sec>]
+```
+
+Common flags: `--connect-timeout <sec>` (relay connection, default 15), `--timeout <sec>` (whole run, default 120; the run never outlives it), and `--name <name>` (the participant name the host shows, default `omp-once`).
+
+Headless behavior is selected by `--once`, never by the absence of a terminal: `omp join <link> | tee` still fails with `requires an interactive terminal`. The `--once`-only flags are refused without `--once`.
+
+### The link file
+
+The link is never accepted in argv: `/proc/<pid>/cmdline` is world-readable and argv is kept in job records. `--once` with a positional link is a usage error. Pass `--link-file`, which must be a regular file owned by the caller with mode `0600` or stricter; any group or other bit is refused. It holds either the bare link or the JSON that `omp collab link --json` prints (its `url` is used):
+
+```
+umask 077; omp collab link <instanceId|pid> --json > ~/.omp-link
+```
+
+The link is never printed. Error messages name the file, never its content.
+
+Use a **control** link. A host replays pending requests only to writers, and refuses writes from view-only peers, so a view-only link (`--view`) is refused up front for every action with exit code 4. The same exit code is returned when the host demotes a full-looking link because its write token is no longer current.
+
+### Actions
+
+- `--print-requests` lists the asks the host is waiting on (approvals, `ask` selects, editor prompts) and exits 0 without writing anything.
+- `--answer <reqId> --value <v>` answers one ask and exits on the host's `ui-request-end` for that reqId. For a select, the value must be one of its option labels; an exact match wins, otherwise a unique case-insensitive match is normalized to the label. Any other value is refused locally (exit 9) and not sent, because a host reads an unknown approval label as a denial. For an editor, any text is sent. A JSON string literal (`--value '" padded "'`) passes leading or trailing whitespace through. An ask that is no longer pending (answered elsewhere, aborted, timed out) returns `status: "already-settled"` with exit 0.
+- `--prompt <text>` sends a prompt. While the host is streaming, it lands as a **steer**: it is delivered at the next turn boundary, not queued as a follow-up. Collab has no follow-up frame. A steer that arrives while an approval is pending denies that tool call and is delivered first.
+- `--abort` interrupts the host's current turn.
+
+`--prompt` and `--abort` exit once the host has handled the frame, including any immediate refusal (for example, startup not finished). A prompt also waits 750 ms for the host's asynchronous refusal. `--wait-idle <sec>` then waits until a `state` frame reads idle (not streaming, nothing queued, not aborting). That frame is the host's debounced footer snapshot and reads idle during scheduling pauses (queued follow-ups, async-job waits, compaction), so the result is labeled `authoritative: false`.
+
+### Leaving without answering is safe
+
+A guest that lists asks and disconnects does not refuse them. When the last writer leaves, its asks stay pending and are replayed to the next writer that joins. So `--print-requests` followed later by a separate `--answer` works. Approvals also survive relay reconnects (`retainOnReconnect`). One edge case: if a `--once` guest is not offered an ask (the host's send queue refused it) while another writer that also lacks it stays connected, the ask settles as unavailable. It never settles merely because a `--once` guest left while another writer still holds it.
+
+### Output (version 1)
+
+On success, one JSON object on stdout:
+
+```json
+{
+  "version": 1,
+  "action": "print-requests",
+  "status": "ok",
+  "requests": [
+    {
+      "reqId": 3,
+      "kind": "select",
+      "title": "Allow bash: rm -rf build?",
+      "approval": true,
+      "options": [{ "label": "Approve" }, { "label": "Deny" }]
+    }
+  ],
+  "host": { "sessionId": "…", "sessionName": "…", "cwd": "/work", "isStreaming": false, "queuedMessageCount": 0, "isAborting": false },
+  "timings": { "connectMs": 40, "welcomeMs": 120, "snapshotMs": 2900, "requestsMs": 2910, "totalMs": 2910, "snapshotEntries": 2304, "snapshotBytes": 9747114 }
+}
+```
+
+| `action`         | Extra fields                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| `print-requests` | `status: "ok"`, `requests[]`: `reqId`, `kind` (`select`/`editor`), `title`, `approval`, `options[]` (`label`, `description?`), `helpText?`, `prefill?` |
+| `answer`         | `reqId`, `status`: `answered` or `already-settled`, `value` (as sent)                                   |
+| `prompt`         | `status: "submitted"`, `steer` (host was streaming when sent; non-authoritative), `idle?`               |
+| `abort`          | `status: "submitted"`, `idle?`                                                                          |
+
+`idle` (with `--wait-idle`) is `{ "authoritative": false, "idle": true|false, "waitedMs": n }`. `host` is the host's state as last seen. `timings` are milliseconds since the guest started connecting: `requestsMs` is time to the complete request list, which comes after the whole snapshot (see below).
+
+`answered` means the answer was sent and the host then ended the ask. A different writer's answer that wins the race reads the same way.
+
+On failure, nothing goes to stdout. One JSON object goes to stderr, `{"version":1,"error":{"code","exitCode","message"}}`, with a matching exit code:
+
+| Exit | `code`          | Meaning                                                                                       |
+| ---- | --------------- | --------------------------------------------------------------------------------------------- |
+| 0    | —               | Success, including `already-settled`                                                          |
+| 1    | `internal`      | Unexpected failure                                                                            |
+| 2    | `usage`         | Bad or conflicting flags                                                                      |
+| 3    | `link`          | Link file missing, unreadable, too permissive, not owned by you, or not a valid link          |
+| 4    | `read-only`     | View-only link, or the host demoted the link to read-only                                     |
+| 5    | `host-gone`     | Room closed, no such room, host stopped (`bye`), or the connection dropped mid-run             |
+| 6    | `timeout`       | `--connect-timeout` or `--timeout` ran out                                                    |
+| 7    | `protocol`      | Collab protocol version mismatch with the host                                                |
+| 8    | `host-error`    | The host refused the join or the action (an `error` frame)                                     |
+| 9    | `invalid-value` | `--value` is not one of the select's options                                                  |
+
+A connection that drops after a write was sent fails with `host-gone`, and the message says the outcome is unknown. The guest never rejoins mid-run, so a prompt is never sent twice.
+
+### Cost on large sessions
+
+Every joiner receives the host's full transcript snapshot before the replayed asks; that order is fixed by the host. `--once` discards the snapshot instead of building a replica (the TUI guest's resume step takes tens of seconds on large sessions), but it cannot skip the transfer: time to the request list is roughly snapshot bytes divided by relay throughput (`timings.snapshotBytes`, `timings.requestsMs`). Over a localhost relay, a 9.7 MB snapshot lists in under 50 ms.
+
+How it knows the request list is complete: right after `hello`, the guest sends a `ui-response` for reqId 0, which no host ever issues. A stock host answers an unknown reqId with a targeted `ui-request-end`. That reply is queued behind the welcome batch (welcome, snapshot chunks, replayed asks), so its arrival marks the end of the replayed asks. The same barrier, sent after a `prompt` or `abort`, confirms the host has handled that frame.
+
+### Discovery loop
+
+Nothing in omp polls for you. A caller that only runs one-shot commands (no stdin, allowlisted commands) can:
+
+1. Poll `omp collab list --json` every ~15 s. When a host's `inputRequired` turns `true`, exit the polling job so the caller wakes up.
+2. Mint a link into a `0600` file: `omp collab link <instanceId> --json`. The link is bound to the host's room generation, so re-mint after `stale_generation` or exit code 5.
+3. Run `omp join --once --link-file <f> --print-requests` and relay the requests (title, options) to a human.
+4. Run `omp join --once --link-file <f> --answer <reqId> --value "<label>"` with the reply. `already-settled` means someone answered at the terminal first.
+
 ## Link format
 
 Accepted by `/join <link>` and `omp join "<link>"`:
@@ -183,6 +289,7 @@ The relay is a small content-blind Go service. It keeps no state beyond live con
 - [`src/collab/host.ts`](../packages/coding-agent/src/collab/host.ts), [`guest.ts`](../packages/coding-agent/src/collab/guest.ts) — authoritative host and local replica
 - [`src/collab/protocol.ts`](../packages/coding-agent/src/collab/protocol.ts), [`crypto.ts`](../packages/coding-agent/src/collab/crypto.ts), [`relay-client.ts`](../packages/coding-agent/src/collab/relay-client.ts) — frames, links, encryption, and transport
 - [`src/collab/registry.ts`](../packages/coding-agent/src/collab/registry.ts) — private local host discovery
+- [`src/collab/headless-guest.ts`](../packages/coding-agent/src/collab/headless-guest.ts), [`src/cli/join-once-cli.ts`](../packages/coding-agent/src/cli/join-once-cli.ts) — `omp join --once`
 - [`src/collab/settings.ts`](../packages/coding-agent/src/collab/settings.ts) — `collab.*` defaults
 - [`packages/collab-web`](../packages/collab-web/) — browser guest and local development relay
 
