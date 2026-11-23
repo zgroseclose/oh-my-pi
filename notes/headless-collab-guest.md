@@ -69,6 +69,16 @@ The localhost number shows the guest's own cost is negligible (decrypt + parse +
 >
 > Happy to send the host-side patch if this direction is acceptable.
 
-## Phase 2 (`--mode rpc`) status
+## Phase 2 (`--mode rpc`): stopped for a design decision
 
-See the PR description.
+The plan was to shim `InteractiveModeContext`, reuse `CollabGuestLink` for the replica, and run `runRpcMode` on the replica session, "getting the RPC event shape and `session_settled` for free". Reading v19.0.0, that does not work as stated:
+
+1. **`guest.ts` takes the whole `InteractiveModeContext`, not `Pick`ed slices.** It touches about 25 members: `handleResumeSession` (the interactive mode's session-switch path, which builds the replica `AgentSession`), `eventController`, `renderInitialMessages`, `streamingComponent`, `pendingTools`, `loadingAnimation`, `statusLine`, `ui`, `showHookSelector`/`showHookEditor`, `setCollabGuest`, `reloadTodos`, `syncRunningSubagentBadge`, and others. A shim has to re-implement session creation (`handleResumeSession`) and stub the render surface.
+2. **Host events never reach the replica session's subscribers.** The guest feeds mirrored events to `ctx.eventController.dispatchSessionEvent` (`guest.ts:797`), and only lifecycle events go to the extension runner. `runRpcMode` subscribes with `session.subscribe` (`rpc-mode.ts:1806`), so it would print no host events. `session_settled` would never fire either.
+3. **`runRpcMode`'s commands drive the local session.** `prompt`/`steer`/`follow_up`/`abort` call the replica's own `AgentSession`, which would start a *local* LLM turn on the replica instead of sending a frame. Every command would need intercepting before `runRpcMode` sees it, at which point little of `runRpcMode` is reused.
+
+Options:
+
+- **A. Shim + `runRpcMode` (as planned).** Biggest diff: a fake context with about 25 members, an event bridge from `dispatchSessionEvent` to the session emitter, and a command interceptor. It pays the replica cost (transfer plus resume, about 90 s on 756 KB). Fragile against `guest.ts` changes, so upstream is unlikely to accept it.
+- **B. Refactor `guest.ts`.** Split `CollabGuestLink` into a TUI-free core (socket, hello/welcome, snapshot accumulation, replica file, frame decoding) and a TUI adapter. RPC gets its own adapter. This gives a real replica (`get_messages` works) but is a large refactor of the most intricate collab file, and it still pays the resume cost.
+- **C. RPC on the lightweight frame layer (recommended).** Extend `headless-guest.ts` into a persistent mode: forward `event` frames (through `fromWireEvent`) as RPC `event` lines, map `ui-request` / `ui-request-end` to `extension_ui_request` / `method: "cancel"`, map RPC commands to `prompt`/`abort`/`ui-response` frames, and return structured errors for `follow_up` and host-only commands. Synthesize `session_settled` from `agent_end` plus `state`, labeled best-effort. No replica and no TUI code are touched; startup costs only the transfer. Trade-off: session-bound commands (`get_messages`, `fork`, `get_session_stats`, …) are unsupported, or answered from retained snapshot entries if needed.
