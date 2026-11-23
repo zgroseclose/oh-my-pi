@@ -1,23 +1,30 @@
 # Headless collab guest: notes
 
-Working notes for the `omp join --once` branch (`feat/headless-collab-guest`, based on `v19.0.0`). Drop this file before opening the upstream PR.
+Working notes for the `omp join --once` branch (`feat/headless-collab-guest`, based on `v19.1.1`; rebased from `v19.0.0` on 2026-11-23, old head kept locally as `backup/headless-collab-guest-v19.0.0`). Drop this file before opening the upstream PR.
 
 ## Run from source on a Bun-only machine
 
 ```
 git clone git@github.com:zgroseclose/oh-my-pi.git && cd oh-my-pi
-git checkout feat/headless-collab-guest   # pinned to v19.0.0: packages are 19.0.0
+git checkout feat/headless-collab-guest   # pinned to v19.1.1: packages are 19.1.1
 bun install                               # verified with bun 1.4.5 (package.json needs >= 1.4.4)
-cp <stock 19.0.0 addon> packages/natives/native/   # see below; required
+cp <stock 19.1.1 addon> packages/natives/native/   # see below; required
 bun packages/coding-agent/src/cli.ts join --once --link-file ~/.omp-link --print-requests
 ```
 
 The installed `omp` stays stock and keeps hosting the TUI.
 
-**Constraint:** the checkout's package version, the addon's version, and the stock omp version must all be the same release. This branch is pinned to `v19.0.0` because that is what the VM runs. A checkout of `main` will not load a 19.0.0 addon. The loader already says so explicitly rather than with a bare dlopen stack:
+**Constraint:** the checkout's package version, the addon's version, and the stock omp version must all be the same release. This branch is pinned to `v19.1.1` because that is what the VM runs. A checkout of `main` needs `main`'s addon.
 
-- addon missing: `Failed to load pi_natives native addon for linux-x64.`, followed by every path it tried and the build hint
-- addon from another release: `Loaded <path> but it reports @oh-my-pi/pi-natives@<A>, not the @<B> this loader expects. The .node file on disk is from a different release than this loader`
+A mismatched addon does **not** fail at startup in a source checkout. The loader's version check (`validateLoadedBindings`) is skipped for workspace loads, so a stale addon loads, and the first call to a symbol it lacks throws:
+
+```
+@oh-my-pi/pi-natives export `shellReservedCommandNames` is missing: …/pi_natives.darwin-arm64.node is the @oh-my-pi/pi-natives@19.0.0 addon, not @19.1.1 — rebuild it with `bun run build:native`.
+```
+
+That message names both releases, but it appears only when that code path runs. Before the matching addon was in place, the rebase showed exactly this: the `--once` tests passed on the 19.0.0 addon, while 17 unrelated collab tests failed on missing exports. Don't take "`--once` works" as proof that the addon matches. Check the version (`ls ~/.omp/natives/`, or the leaf package's `package.json`) before copying.
+
+An addon that is missing entirely does fail at startup: `Failed to load pi_natives native addon for linux-x64.`, followed by every path it tried and the build hint.
 
 ### Native addon check (result: the addon is required, a Rust build is not)
 
@@ -26,15 +33,15 @@ The installed `omp` stays stock and keeps hosting the TUI.
 - `src/cli.ts:546` calls `installSqliteLockShim()` for every command except `--help`/`--version`, which loads `pi_natives`. Without an addon, `bun src/cli.ts join …` dies there before `join` runs.
 - Even the transport alone loads it: `collab/crypto.ts` imports `asStrictBytes` from the `@oh-my-pi/pi-utils` barrel, and that barrel loads the addon (`dirs.ts`, `file-lock.ts`, `sqlite.ts`, …). `collab/protocol.ts` is the only collab module that imports cleanly without one.
 
-The fix is to reuse a prebuilt addon of the **same version** (the loader rejects a `.node` from another release; this branch is `19.0.0`). A workspace checkout only looks in `packages/natives/native/` and in the directory of the `bun` binary. It does **not** look in `~/.omp/natives/` or read `PI_NATIVES_DIR`. So copy one in:
+The fix is to reuse a prebuilt addon of the **same version** (see the constraint above; this branch is `19.1.1`). A workspace checkout only looks in `packages/natives/native/` and in the directory of the `bun` binary. It does **not** look in `~/.omp/natives/` or read `PI_NATIVES_DIR`. So copy one in:
 
-- Stock omp installed as the compiled binary: it extracts its addon to `~/.omp/natives/19.0.0/` on first run. `cp ~/.omp/natives/19.0.0/pi_natives.linux-x64*.node packages/natives/native/`
+- Stock omp installed as the compiled binary: it extracts its addon to `~/.omp/natives/19.1.1/` on first run. `cp ~/.omp/natives/19.1.1/pi_natives.linux-x64*.node packages/natives/native/`
 - Stock omp installed through npm/bun: the leaf package is in the global `node_modules`, at `@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64*.node`.
-- Neither: download `@oh-my-pi/pi-natives-linux-x64@19.0.0` from the npm registry and copy the `.node` out of `package/`.
+- Neither: download `@oh-my-pi/pi-natives-linux-x64@19.1.1` from the npm registry and copy the `.node` out of `package/`.
 
 `packages/natives/native/*.node` is gitignored. After rebasing onto `main` the package version changes, so the addon must be replaced with a matching one.
 
-Measured on macOS arm64 (Bun 1.4.5, addon from `@oh-my-pi/pi-natives-darwin-arm64@19.0.0`): `bun src/cli.ts join --once …` starts and exits in about 0.45 s.
+Measured on macOS arm64 with Bun 1.4.5: `bun src/cli.ts join --once …` starts and exits in about 0.45 s, both on v19.0.0 and after the rebase onto v19.1.1 (with the matching `@oh-my-pi/pi-natives-darwin-arm64` addon each time).
 
 ## Time to first ask
 
@@ -70,9 +77,9 @@ On loopback, the guest's own cost is negligible (decrypt, parse, discard), and t
 > Two things in the current protocol limit it:
 >
 > 1. **Every joiner pays for the full transcript before it can see an ask.** `#welcomeBatch` sends `welcome` → all `snapshot-chunk`s → replayed asks as one unit. Skipping the replica avoids the TUI guest's resume cost (about 90 s to first event on a 756 KB transcript in our measurement), but not the transfer. On a ~9 MB session through the public relay, time to the request list was **TODO ms** (`timings.requestsMs`), against 37 ms for the same size over a localhost relay. A persistent RPC guest built on `CollabGuestLink` pays the transfer *and* the replica resume.
-> 2. **No follow-up frame.** A guest `prompt` while the host is streaming is always a steer (`promptCustomMessage(..., { streamingBehavior: "steer" })`), and a steer that arrives during a pending approval denies the tool call. RPC clients that expect `follow_up` semantics have no equivalent.
+> 2. **Follow-up support can't be detected.** v19.1.1 added `followUp?: true` to the guest `prompt` frame, which closes the steer-only gap on new hosts. But `COLLAB_PROTO` stayed at 3, and a v19.0.x host ignores the unknown field and steers instead. A guest therefore can't tell whether its follow-up will be honored, and a follow-up that silently becomes a steer is worse than an error: a steer that arrives during a pending approval denies the tool call. `--once` does not expose `followUp` for this reason.
 >
-> **Proposal (host-side, backward compatible):** an optional `hello` flag, e.g. `{ t: "hello", …, snapshot: false }`. The host answers with `welcome` (with `entryCount: 0`) plus the replayed asks, and skips the snapshot chunks. Hosts that don't know the flag ignore it and send the snapshot as today, which the lightweight guest already handles. Optionally, a guest `prompt` could carry `streamingBehavior: "followUp"` for the second gap.
+> **Proposal (host-side, backward compatible):** an optional `hello` flag, e.g. `{ t: "hello", …, snapshot: false }`. The host answers with `welcome` (with `entryCount: 0`) plus the replayed asks, and skips the snapshot chunks. Hosts that don't know the flag ignore it and send the snapshot as today, which the lightweight guest already handles. For the second gap, the `welcome` could carry a capability list (e.g. `features: ["follow-up"]`) so guests send `followUp` only to hosts that honor it, and fail loudly otherwise.
 >
 > Happy to send the host-side patch if this direction is acceptable.
 
