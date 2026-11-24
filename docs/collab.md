@@ -202,6 +202,32 @@ Nothing in omp polls for you. A caller that only runs one-shot commands (no stdi
 3. Run `omp join --once --link-file <f> --print-requests` and relay the requests (title, options) to a human.
 4. Write the reply to a `0600` file and run `omp join --once --link-file <f> --answer <reqId> --value-file <reply>`. `already-settled` means someone answered at the terminal first.
 
+## Headless message stream (`omp join --print-messages`)
+
+Prints the session's messages as JSON lines, one object per line, flushed per line, with the **complete** text (no cap). It reads the link from `--link-file` under the same rules as `--once`, and never prints it.
+
+```
+omp join --print-messages --link-file ~/.omp-link                     # snapshot, then exit 0
+omp join --print-messages --link-file ~/.omp-link --since <id>        # only lines after <id>
+omp join --print-messages --link-file ~/.omp-link --since <id> --follow
+```
+
+```json
+{"id":"1795551432030-ent00002","role":"assistant","ts":1795551432030,"kind":"message","text":"…full text…"}
+```
+
+- **View-only, always.** The stream never sends the write token, even from a control link, so the host counts it as a viewer. A long-lived `--follow` therefore never changes when asks settle (see [Keep the guest short-lived](#keep-the-guest-short-lived)). Viewers receive no asks, so approvals are not in the stream: use `--once --print-requests`.
+- **Source.** Lines come from session entries: the snapshot replay, then live `entry` frames. An assistant message is appended at its `message_end`, so `--follow` prints each message as it completes, mid-turn included. Streaming deltas are not printed.
+- **`id`.** `<13-digit epoch ms>-<entry id>`, plus `.<n>` for the n-th tool call of an assistant entry. The entry id is the `id` in the session JSONL. Ids are stable across joins and sort in append order. Treat them as opaque.
+- **`role`.** `user` or `assistant`. A collab guest's prompt is `user` with `from` set to the guest's display name.
+- **`--since <id>`.** Prints only lines after `<id>`. If `<id>` is not in the snapshot (compacted away, wrong session), every line is printed with `"reset": true` so the caller knows it lost its place. Live lines after the snapshot carry no `reset`.
+- **`--include-tools`.** Also prints `"kind":"tool"` lines: `event` is `call` (with the tool name and a one-line argument `summary`), `result` (with `isError` and a one-line output `summary`), or `bash` (a user `!` command). `summary` is at most 160 characters and `chars` is the size of what it summarizes. Tool lines never carry the full payload. Their ids are valid cursors.
+- **`--max-chars <n>`.** Caller-side cap on each message's text. A cut line has `"truncated": true` and `chars` (the full length). The default, 0, is unlimited.
+- **`--follow`.** Stays joined and prints new lines as they land. It exits 0 on the host's goodbye (the host stopped the room) and 5 (`host-gone`) on relay loss, a room that closes without a goodbye, or a reconnect. Resume with `--since <last id>`, because it never rejoins on its own. An idle session prints nothing and runs no timer. `--timeout` (default 120 s) bounds only the join, up to the end of the snapshot.
+- **Oversized entries.** The host replaces an entry over 1 MiB of JSON with a placeholder. Such a line has `"omitted": true`, and its text is the placeholder, not the original.
+
+Errors use the `--once` stderr object and exit codes. `--print-messages` cannot be combined with `--print-requests`, `--answer`, `--prompt`, `--abort` or `--wait-idle` (exit 2), and `--since`/`--follow`/`--include-tools`/`--max-chars` require it.
+
 ## Link format
 
 Accepted by `/join <link>` and `omp join "<link>"`:
@@ -297,6 +323,7 @@ The relay is a small content-blind Go service. It keeps no state beyond live con
 - [`src/collab/protocol.ts`](../packages/coding-agent/src/collab/protocol.ts), [`crypto.ts`](../packages/coding-agent/src/collab/crypto.ts), [`relay-client.ts`](../packages/coding-agent/src/collab/relay-client.ts) — frames, links, encryption, and transport
 - [`src/collab/registry.ts`](../packages/coding-agent/src/collab/registry.ts) — private local host discovery
 - [`src/collab/headless-guest.ts`](../packages/coding-agent/src/collab/headless-guest.ts), [`src/cli/join-once-cli.ts`](../packages/coding-agent/src/cli/join-once-cli.ts) — `omp join --once`
+- [`src/collab/headless-stream.ts`](../packages/coding-agent/src/collab/headless-stream.ts) — `omp join --print-messages`
 - [`src/collab/settings.ts`](../packages/coding-agent/src/collab/settings.ts) — `collab.*` defaults
 - [`packages/collab-web`](../packages/collab-web/) — browser guest and local development relay
 

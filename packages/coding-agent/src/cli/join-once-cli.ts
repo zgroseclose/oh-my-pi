@@ -20,6 +20,7 @@ import {
 	HEADLESS_OUTPUT_VERSION,
 	runHeadlessGuest,
 } from "../collab/headless-guest";
+import { DEFAULT_STREAM_GUEST_NAME, runHeadlessStream } from "../collab/headless-stream";
 
 export const DEFAULT_CONNECT_TIMEOUT_SEC = 15;
 export const DEFAULT_ONCE_TIMEOUT_SEC = 120;
@@ -41,6 +42,16 @@ export interface JoinOnceFlags {
 	connectTimeout?: number;
 	timeout?: number;
 	name?: string;
+	/** Stream mode: print message lines instead of one result object. */
+	printMessages?: boolean;
+	/** Stream mode: print only lines after this id. */
+	since?: string;
+	/** Stream mode: stay joined and print new lines until the host ends the session. */
+	follow?: boolean;
+	/** Stream mode: also print compact tool-call / tool-result lines. */
+	includeTools?: boolean;
+	/** Stream mode: cap each message's text at this many characters (0 = unlimited, the default). */
+	maxChars?: number;
 }
 
 export interface JoinOnceIo {
@@ -189,9 +200,57 @@ async function inlineInputFiles(flags: JoinOnceFlags): Promise<JoinOnceFlags> {
 	return out;
 }
 
-/** Run `omp join --once`; returns the process exit code. */
+const STREAM_ONLY_FLAGS = [
+	["since", "--since"],
+	["follow", "--follow"],
+	["includeTools", "--include-tools"],
+	["maxChars", "--max-chars"],
+] as const;
+
+/** `--print-messages` and its modifiers; refuses any write action alongside it. */
+async function runStream(flags: JoinOnceFlags, io: JoinOnceIo): Promise<void> {
+	const writes: string[] = [];
+	if (flags.printRequests) writes.push("--print-requests");
+	if (flags.answer !== undefined) writes.push("--answer");
+	if (flags.prompt !== undefined || flags.promptFile !== undefined) writes.push("--prompt");
+	if (flags.abort) writes.push("--abort");
+	if (flags.waitIdle !== undefined) writes.push("--wait-idle");
+	if (flags.value !== undefined || flags.valueFile !== undefined) writes.push("--value");
+	if (writes.length > 0) throw usage(`--print-messages cannot be combined with ${writes.join(", ")}`);
+	if (flags.since !== undefined && !flags.since.trim()) throw usage("--since needs an id printed by --print-messages");
+	const maxChars = flags.maxChars ?? 0;
+	if (!Number.isInteger(maxChars) || maxChars < 0)
+		throw usage("--max-chars must be 0 (unlimited) or a positive integer");
+	if (!flags.linkFile)
+		throw usage("--print-messages requires --link-file <path> (the link is never accepted in argv)");
+	const connectTimeoutMs =
+		positiveSeconds("connect-timeout", flags.connectTimeout, DEFAULT_CONNECT_TIMEOUT_SEC) * 1000;
+	const deadlineMs = positiveSeconds("timeout", flags.timeout, DEFAULT_ONCE_TIMEOUT_SEC) * 1000;
+	const link = await readLinkFile(flags.linkFile);
+	await runHeadlessStream({
+		link,
+		name: flags.name?.trim() || DEFAULT_STREAM_GUEST_NAME,
+		since: flags.since?.trim(),
+		follow: flags.follow === true,
+		includeTools: flags.includeTools === true,
+		maxChars,
+		connectTimeoutMs,
+		deadlineMs,
+		write: line => io.stdout(`${JSON.stringify(line)}\n`),
+	});
+}
+
+/** Run `omp join --once` (or `--print-messages`); returns the process exit code. */
 export async function runJoinOnce(flags: JoinOnceFlags, io: JoinOnceIo = processIo): Promise<number> {
 	try {
+		if (flags.printMessages) {
+			await runStream(flags, io);
+			return HeadlessExitCode.ok;
+		}
+		for (const [key, flag] of STREAM_ONLY_FLAGS) {
+			if (flags[key] !== undefined && flags[key] !== false)
+				throw usage(`${flag} is only valid with --print-messages`);
+		}
 		const action = resolveOnceAction(await inlineInputFiles(flags));
 		if (!flags.linkFile) throw usage("--once requires --link-file <path> (the link is never accepted in argv)");
 		const connectTimeoutMs =

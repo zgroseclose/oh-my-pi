@@ -42,18 +42,38 @@ export default class Join extends Command {
 		}),
 		"connect-timeout": Flags.integer({ description: "--once: relay connect timeout in seconds (default 15)" }),
 		timeout: Flags.integer({ description: "--once: overall deadline in seconds (default 120)" }),
-		name: Flags.string({ description: "--once: display name shown to the host (default omp-once)" }),
+		name: Flags.string({
+			description: "--once: display name shown to the host (default omp-once; omp-watch with --print-messages)",
+		}),
+		"print-messages": Flags.boolean({
+			description:
+				"Headless, view-only: print session messages as JSON lines (full text) and exit at the end of the snapshot",
+			default: false,
+		}),
+		since: Flags.string({ description: "--print-messages: print only lines after this id (an id it printed)" }),
+		follow: Flags.boolean({
+			description: "--print-messages: stay joined, print new lines as they land, exit 0 when the host ends",
+			default: false,
+		}),
+		"include-tools": Flags.boolean({
+			description: "--print-messages: also print compact tool-call/result lines (kind: tool)",
+			default: false,
+		}),
+		"max-chars": Flags.integer({
+			description: "--print-messages: cap each message's text (default 0 = unlimited)",
+		}),
 	};
 
 	static examples = [
 		`${APP_NAME} join "relay.example.sh/abc123#key"`,
 		`${APP_NAME} join --once --link-file ~/.omp-link --print-requests`,
 		`${APP_NAME} join --once --link-file ~/.omp-link --answer 3 --value "Approve"`,
+		`${APP_NAME} join --print-messages --link-file ~/.omp-link --since <id> --follow`,
 	];
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Join);
-		if (flags.once) {
+		if (flags.once || flags["print-messages"]) {
 			if (args.link !== undefined) {
 				process.stderr.write(
 					`${APP_NAME} join --once does not take the link as an argument; pass --link-file <path> (mode 0600)\n`,
@@ -74,6 +94,11 @@ export default class Join extends Command {
 				connectTimeout: flags["connect-timeout"],
 				timeout: flags.timeout,
 				name: flags.name,
+				printMessages: flags["print-messages"],
+				since: flags.since,
+				follow: flags.follow,
+				includeTools: flags["include-tools"],
+				maxChars: flags["max-chars"],
 			});
 			return;
 		}

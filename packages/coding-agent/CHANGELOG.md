@@ -5,6 +5,7 @@
 ### Added
 
 - Added `omp join --once` to read, answer, prompt, or abort a live collab session from scripts: it reads the link (and, with `--prompt-file`/`--value-file`, prompts and answers) from 0600 files, prints one JSON object, and exits with distinct codes, without building a replica session.
+- Added `omp join --print-messages` to stream a live collab session's messages as JSON lines with full text, with `--since <id>` to resume, `--follow` to keep printing until the host ends the session, `--include-tools` for compact tool lines, and `--max-chars` as an opt-in cap. It always joins view-only.
 
 ## [19.1.1] - 2026-11-23
 

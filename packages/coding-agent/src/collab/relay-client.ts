@@ -638,6 +638,15 @@ export class CollabSocket {
 		}
 	}
 
+	/**
+	 * Resolves once every frame received so far has been dispatched to
+	 * {@link onFrame}. `onClose` is not ordered behind decryption, so a host's
+	 * goodbye can still be in flight when its room's close is reported.
+	 */
+	received(): Promise<void> {
+		return this.#recvChain.then(() => {});
+	}
+
 	/** Intentional close: clears any retry timer, suppresses reconnect. A later connect() starts fresh. */
 	close(): void {
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
